@@ -75,6 +75,31 @@ fi
 
 node -e 'const [a,b,c]=process.versions.node.split(".").map(Number);const ok=a>22||(a===22&&(b>12||(b===12&&c>=0)));if(!ok){console.error(`Node ${process.versions.node} is too old. Require >= 22.12.0`);process.exit(1)}'
 
+# ---------------------------------------------------------------------------
+# Build cache: skip if the runtime was already built for the pinned version.
+# ---------------------------------------------------------------------------
+DESIRED_VERSION=""
+DESIRED_VERSION=$(node -e "
+  const pkg = require('$ELECTRON_ROOT/package.json');
+  if (pkg.openclaw && pkg.openclaw.version) console.log(pkg.openclaw.version);
+" 2>/dev/null || true)
+
+if [[ -n "$DESIRED_VERSION" && "$OPENCLAW_FORCE_BUILD" != "1" ]]; then
+  BUILD_INFO="$OUT_DIR/runtime-build-info.json"
+  if [[ -f "$BUILD_INFO" ]]; then
+    BUILT_VERSION=$(node -e "
+      const info = require('$BUILD_INFO');
+      console.log(info.openclawVersion || '');
+    " 2>/dev/null || true)
+    if [[ "$BUILT_VERSION" == "$DESIRED_VERSION" ]]; then
+      echo "[openclaw-runtime] Already built for $DESIRED_VERSION (target=$TARGET_ID), skipping."
+      echo "[openclaw-runtime] Use OPENCLAW_FORCE_BUILD=1 to force rebuild."
+      exit 0
+    fi
+  fi
+  echo "[openclaw-runtime] Pinned version: $DESIRED_VERSION (current build: ${BUILT_VERSION:-none})"
+fi
+
 echo "[1/7] Building OpenClaw from source: $OPENCLAW_SRC"
 pushd "$OPENCLAW_SRC" >/dev/null
 corepack enable >/dev/null 2>&1 || true
@@ -111,16 +136,38 @@ cp -R "$PKG_DIR" "$OUT_DIR"
 
 # Save build metadata for traceability.
 # Use `node -` so stdin is treated as script and the following args remain user args.
-node - "$OUT_DIR" "$OPENCLAW_SRC" "$TARGET_ID" <<'NODE'
+node - "$OUT_DIR" "$OPENCLAW_SRC" "$TARGET_ID" "$ELECTRON_ROOT" <<'NODE'
 const fs = require('fs');
 const path = require('path');
+const { execFileSync } = require('child_process');
 const outDir = process.argv[2];
 const src = process.argv[3];
 const target = process.argv[4];
+const electronRoot = process.argv[5];
+
+// Read pinned version from package.json
+let openclawVersion = '';
+try {
+  const pkg = require(path.join(electronRoot, 'package.json'));
+  openclawVersion = (pkg.openclaw && pkg.openclaw.version) || '';
+} catch {}
+
+// Read git commit hash from openclaw source
+let openclawCommit = '';
+try {
+  openclawCommit = execFileSync('git', ['rev-parse', 'HEAD'], {
+    cwd: src,
+    encoding: 'utf-8',
+    stdio: ['ignore', 'pipe', 'ignore'],
+  }).trim();
+} catch {}
+
 const meta = {
   builtAt: new Date().toISOString(),
   source: src,
   target,
+  openclawVersion,
+  openclawCommit,
 };
 fs.writeFileSync(path.join(outDir, 'runtime-build-info.json'), JSON.stringify(meta, null, 2) + '\n');
 NODE
