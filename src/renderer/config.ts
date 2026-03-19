@@ -322,8 +322,8 @@ export const defaultConfig: AppConfig = {
       models: [
         { id: 'deepseek-chat', name: 'DeepSeek Chat', supportsImage: false },
         { id: 'deepseek-reasoner', name: 'DeepSeek Reasoner', supportsImage: false },
-        { id: 'deepseek-inhouse-chat', name: 'DeepSeek Chat (安全)', supportsImage: false },
-        { id: 'deepseek-inhouse-reasoner', name: 'DeepSeek Reasoner (安全)', supportsImage: false }
+        { id: 'deepseek-inhouse-chat', name: 'DeepSeek Chat (Secure)', supportsImage: false },
+        { id: 'deepseek-inhouse-reasoner', name: 'DeepSeek Reasoner (Secure)', supportsImage: false }
       ]
     },
     qwen: {

@@ -52,6 +52,8 @@ type TabType = 'general'| 'coworkAgentEngine' | 'model' | 'coworkMemory' | 'cowo
 export type SettingsOpenOptions = {
   initialTab?: TabType;
   notice?: string;
+  noticeI18nKey?: string;
+  noticeExtra?: string;
 };
 
 interface SettingsProps extends SettingsOpenOptions {
@@ -344,6 +346,7 @@ const CONNECTIVITY_TEST_TOKEN_BUDGET = 64;
 const getDefaultProviders = (): ProvidersConfig => {
   const providers = (defaultConfig.providers ?? {}) as ProvidersConfig;
   const entries = Object.entries(providers) as Array<[string, ProviderConfig]>;
+  const secureSuffix = i18nService.t('modelSuffixSecure');
   return Object.fromEntries(
     entries.map(([providerKey, providerConfig]) => [
       providerKey,
@@ -351,6 +354,7 @@ const getDefaultProviders = (): ProvidersConfig => {
         ...providerConfig,
         models: providerConfig.models?.map(model => ({
           ...model,
+          name: model.name.replace('(Secure)', secureSuffix),
           supportsImage: model.supportsImage ?? false,
         })),
       },
@@ -374,7 +378,7 @@ const joinWorkspacePath = (dir: string | undefined, filename: string): string =>
     : `${base}${sep}${filename}`;
 };
 
-const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice, onUpdateFound }) => {
+const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice, noticeI18nKey, noticeExtra, onUpdateFound }) => {
   const dispatch = useDispatch();
   // 状态
   const [activeTab, setActiveTab] = useState<TabType>(initialTab ?? 'general');
@@ -385,7 +389,15 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice, onUpda
   const [isUpdatingAutoLaunch, setIsUpdatingAutoLaunch] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [noticeMessage, setNoticeMessage] = useState<string | null>(notice ?? null);
+  const buildNoticeMessage = (): string | null => {
+    if (noticeI18nKey) {
+      const base = i18nService.t(noticeI18nKey);
+      return noticeExtra ? `${base} (${noticeExtra})` : base;
+    }
+    return notice ?? null;
+  };
+
+  const [noticeMessage, setNoticeMessage] = useState<string | null>(() => buildNoticeMessage());
   const [testResult, setTestResult] = useState<ProviderConnectionTestResult | null>(null);
   const [isTestResultModalOpen, setIsTestResultModalOpen] = useState(false);
   const [isTesting, setIsTesting] = useState(false);
@@ -809,8 +821,8 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice, onUpda
   }, [activeTab]);
 
   useEffect(() => {
-    setNoticeMessage(notice ?? null);
-  }, [notice]);
+    setNoticeMessage(buildNoticeMessage());
+  }, [notice, noticeI18nKey, noticeExtra]);
 
   useEffect(() => {
     if (initialTab) {
@@ -822,9 +834,14 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice, onUpda
   useEffect(() => {
     const unsubscribe = i18nService.subscribe(() => {
       setLanguage(i18nService.getLanguage());
+      // Re-translate notice message on language change
+      if (noticeI18nKey) {
+        const base = i18nService.t(noticeI18nKey);
+        setNoticeMessage(noticeExtra ? `${base} (${noticeExtra})` : base);
+      }
     });
     return unsubscribe;
-  }, []);
+  }, [noticeI18nKey, noticeExtra]);
 
   // Compute visible providers based on language
   const visibleProviders = useMemo(() => {
@@ -2543,7 +2560,7 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice, onUpda
                         Coding Plan
                       </span>
                       <span className="text-[10px] px-1.5 py-0.5 rounded-md bg-claude-accent/10 text-claude-accent">
-                        订阅套餐
+                        {i18nService.t('codingPlanSubscriptionBadge')}
                       </span>
                     </div>
                     <p className="mt-0.5 text-[11px] dark:text-claude-darkTextSecondary text-claude-textSecondary">
