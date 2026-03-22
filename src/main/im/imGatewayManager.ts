@@ -505,7 +505,7 @@ export class IMGatewayManager extends EventEmitter {
         lastOutboundAt: null as number | null,
       },
       weixin: {
-        connected: Boolean(config.weixin?.enabled),
+        connected: Boolean(config.weixin?.enabled && config.weixin?.accountId),
         startedAt: null as number | null,
         lastError: null as string | null,
         lastInboundAt: null as number | null,
@@ -768,7 +768,7 @@ export class IMGatewayManager extends EventEmitter {
       return;
     } else if (platform === 'weixin') {
       // Weixin runs via OpenClaw gateway (weixin-openclaw-plugin)
-      console.log('[IMGatewayManager] Weixin in OpenClaw mode, syncing config instead of starting direct gateway');
+      console.debug('[IMGatewayManager] Weixin in OpenClaw mode, syncing config instead of starting direct gateway');
       await this.syncOpenClawConfig?.();
       await this.ensureOpenClawGatewayConnected?.();
       return;
@@ -824,7 +824,7 @@ export class IMGatewayManager extends EventEmitter {
       return;
     } else if (platform === 'weixin') {
       // Weixin runs via OpenClaw gateway
-      console.log('[IMGatewayManager] Weixin in OpenClaw mode, syncing disabled config');
+      console.debug('[IMGatewayManager] Weixin in OpenClaw mode, syncing disabled config');
       await this.syncOpenClawConfig?.();
       return;
     } else if (platform === 'popo') {
@@ -948,9 +948,8 @@ export class IMGatewayManager extends EventEmitter {
       return Boolean(config.wecom?.enabled && config.wecom.botId && config.wecom.secret);
     }
     if (platform === 'weixin') {
-      // Weixin runs via OpenClaw; consider it connected when enabled
       const config = this.getConfig();
-      return Boolean(config.weixin?.enabled);
+      return Boolean(config.weixin?.enabled && config.weixin?.accountId);
     }
     if (platform === 'popo') {
       // POPO runs via OpenClaw; consider it connected when enabled and configured
@@ -978,7 +977,7 @@ export class IMGatewayManager extends EventEmitter {
         console.log('[IMGatewayManager] WeCom notification via OpenClaw not yet supported');
       } else if (platform === 'weixin') {
         // Weixin runs via OpenClaw; notifications are handled by the weixin-openclaw-plugin
-        console.log('[IMGatewayManager] Weixin notification via OpenClaw not yet supported');
+        console.debug('[IMGatewayManager] Weixin notification via OpenClaw not yet supported');
       } else if (platform === 'popo') {
         // POPO runs via OpenClaw; notifications are handled by the moltbot-popo plugin
         console.log('[IMGatewayManager] POPO notification via OpenClaw not yet supported');
@@ -1010,7 +1009,7 @@ export class IMGatewayManager extends EventEmitter {
         console.log('[IMGatewayManager] WeCom notification with media via OpenClaw not yet supported');
       } else if (platform === 'weixin') {
         // Weixin runs via OpenClaw; notifications are handled by the weixin-openclaw-plugin
-        console.log('[IMGatewayManager] Weixin notification with media via OpenClaw not yet supported');
+        console.debug('[IMGatewayManager] Weixin notification with media via OpenClaw not yet supported');
       } else if (platform === 'popo') {
         // POPO runs via OpenClaw; notifications are handled by the moltbot-popo plugin
         console.log('[IMGatewayManager] POPO notification with media via OpenClaw not yet supported');
@@ -1473,8 +1472,12 @@ export class IMGatewayManager extends EventEmitter {
       );
       console.log('[IMGatewayManager] Weixin QR login wait result:', result.message, 'connected:', result.connected);
       if (result.connected) {
-        // Sync config to pick up new account
+        // Sync config and restart gateway so the weixin channel starts with
+        // the newly saved account credentials. The gateway's web.login.wait
+        // handler called context.startChannel, but the channel may not fully
+        // initialize without a proper config-driven restart.
         await this.syncOpenClawConfig?.();
+        await this.ensureOpenClawGatewayConnected?.();
       }
       return result;
     } catch (err) {

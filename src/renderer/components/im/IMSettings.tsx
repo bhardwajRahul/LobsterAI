@@ -139,7 +139,6 @@ const IMSettings: React.FC = () => {
   const [weixinQrStatus, setWeixinQrStatus] = useState<'idle' | 'loading' | 'showing' | 'waiting' | 'success' | 'error'>('idle');
   const [weixinQrUrl, setWeixinQrUrl] = useState<string>('');
   const [weixinQrError, setWeixinQrError] = useState<string>('');
-  const [, setWeixinQrSessionKey] = useState<string>('');
   const [localIp, setLocalIp] = useState<string>('');
   const isMountedRef = useRef(true);
 
@@ -257,7 +256,6 @@ const IMSettings: React.FC = () => {
       setWeixinQrStatus('idle');
       setWeixinQrUrl('');
       setWeixinQrError('');
-      setWeixinQrSessionKey('');
     }
   }, [activePlatform]);
 
