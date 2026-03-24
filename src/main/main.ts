@@ -4462,6 +4462,14 @@ if (!gotTheLock) {
       } catch (error) {
         console.error('[Enterprise] config sync failed:', error);
       }
+    } else {
+      // No enterprise config package found — clear any previously stored config
+      // so the app exits enterprise mode after the package is removed.
+      const hadEnterprise = store.get('enterprise_config');
+      if (hadEnterprise) {
+        store.delete('enterprise_config');
+        console.log('[Enterprise] config package removed, cleared enterprise mode');
+      }
     }
 
     bindCoworkRuntimeForwarder();
