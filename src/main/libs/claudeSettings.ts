@@ -23,6 +23,7 @@ const MOONSHOT_CODING_PLAN_ANTHROPIC_BASE_URL = 'https://api.kimi.com/coding';
 
 type ProviderModel = {
   id: string;
+  name?: string;
   supportsImage?: boolean;
 };
 
@@ -50,6 +51,7 @@ export type ApiConfigResolution = {
     providerName: string;
     codingPlanEnabled: boolean;
     supportsImage?: boolean;
+    modelName?: string;
   };
 };
 
@@ -72,6 +74,18 @@ let serverBaseUrlGetter: (() => string) | null = null;
 
 export function setServerBaseUrlGetter(getter: () => string): void {
   serverBaseUrlGetter = getter;
+}
+
+// Cached server model metadata (populated when auth:getModels is called)
+// Keyed by modelId → { supportsImage }
+let serverModelMetadataCache: Map<string, { supportsImage?: boolean }> = new Map();
+
+export function updateServerModelMetadata(models: Array<{ modelId: string; supportsImage?: boolean }>): void {
+  serverModelMetadataCache = new Map(models.map(m => [m.modelId, { supportsImage: m.supportsImage }]));
+}
+
+export function clearServerModelMetadata(): void {
+  serverModelMetadataCache.clear();
 }
 
 const getStore = (): SqliteStore | null => {
@@ -108,6 +122,7 @@ type MatchedProvider = {
   apiFormat: AnthropicApiFormat;
   baseURL: string;
   supportsImage?: boolean;
+  modelName?: string;
 };
 
 function getEffectiveProviderApiFormat(providerName: string, apiFormat: unknown): AnthropicApiFormat {
@@ -131,13 +146,15 @@ function tryLobsteraiServerFallback(modelId?: string): MatchedProvider | null {
   const effectiveModelId = modelId?.trim() || '';
   if (!effectiveModelId) return null;
   const baseURL = `${serverBaseUrl}/api/proxy/v1`;
-  console.log('[ClaudeSettings] lobsterai-server fallback activated:', { baseURL, modelId: effectiveModelId });
+  const cachedMeta = serverModelMetadataCache.get(effectiveModelId);
+  console.log('[ClaudeSettings] lobsterai-server fallback activated:', { baseURL, modelId: effectiveModelId, supportsImage: cachedMeta?.supportsImage });
   return {
     providerName: 'lobsterai-server',
-    providerConfig: { enabled: true, apiKey: tokens.accessToken, baseUrl: baseURL, apiFormat: 'openai', models: [{ id: effectiveModelId }] },
+    providerConfig: { enabled: true, apiKey: tokens.accessToken, baseUrl: baseURL, apiFormat: 'openai', models: [{ id: effectiveModelId, supportsImage: cachedMeta?.supportsImage }] },
     modelId: effectiveModelId,
     apiFormat: 'openai',
     baseURL,
+    supportsImage: cachedMeta?.supportsImage,
   };
 }
 
@@ -288,6 +305,7 @@ function resolveMatchedProvider(appConfig: AppConfig): { matched: MatchedProvide
       apiFormat,
       baseURL,
       supportsImage: matchedModel?.supportsImage,
+      modelName: matchedModel?.name,
     },
   };
 }
@@ -467,6 +485,7 @@ export function resolveRawApiConfig(): ApiConfigResolution {
       providerName: matched.providerName,
       codingPlanEnabled: !!matched.providerConfig.codingPlanEnabled,
       supportsImage: matched.supportsImage,
+      modelName: matched.modelName,
     },
   };
 }
@@ -491,14 +510,48 @@ function mapQwenModelToOAuthModel(modelId: string, supportsImage?: boolean): str
   // For all other models (including qwen3.5-plus, qwen3-coder-plus), use coder-model
   return 'coder-model';
 }
+  /**
+   * Collect apiKeys for ALL configured providers (not just the currently selected one).
+   * Used by OpenClaw config sync to pre-register all apiKeys as env vars at gateway
+   * startup, so switching between providers doesn't require a process restart.
+   *
+   * Returns a map of env-var-safe provider name → apiKey.
+   */
+  export function resolveAllProviderApiKeys(): Record<string, string> {
+    const result: Record<string, string> = {};
 
-export function buildEnvForConfig(config: CoworkApiConfig): Record<string, string> {
-  const baseEnv = { ...process.env } as Record<string, string>;
+    // lobsterai-server: uses auth accessToken
+    const tokens = authTokensGetter?.();
+    const serverBaseUrl = serverBaseUrlGetter?.();
+    if (tokens?.accessToken && serverBaseUrl) {
+      result.SERVER = tokens.accessToken;
+    }
 
-  baseEnv.ANTHROPIC_AUTH_TOKEN = config.apiKey;
-  baseEnv.ANTHROPIC_API_KEY = config.apiKey;
-  baseEnv.ANTHROPIC_BASE_URL = config.baseURL;
-  baseEnv.ANTHROPIC_MODEL = config.model;
+    // All configured custom providers
+    const sqliteStore = getStore();
+    if (!sqliteStore) return result;
+    const appConfig = sqliteStore.get<AppConfig>('app_config');
+    if (!appConfig?.providers) return result;
 
-  return baseEnv;
-}
+    for (const [providerName, providerConfig] of Object.entries(appConfig.providers)) {
+      if (!providerConfig?.enabled) continue;
+      const apiKey = providerConfig.apiKey?.trim();
+      if (!apiKey && providerRequiresApiKey(providerName)) continue;
+      const envName = providerName.toUpperCase().replace(/[^A-Z0-9]/g, '_');
+      result[envName] = apiKey || 'sk-lobsterai-local';
+    }
+
+    return result;
+  }
+  
+
+  export function buildEnvForConfig(config: CoworkApiConfig): Record<string, string> {
+    const baseEnv = { ...process.env } as Record<string, string>;
+
+    baseEnv.ANTHROPIC_AUTH_TOKEN = config.apiKey;
+    baseEnv.ANTHROPIC_API_KEY = config.apiKey;
+    baseEnv.ANTHROPIC_BASE_URL = config.baseURL;
+    baseEnv.ANTHROPIC_MODEL = config.model;
+
+    return baseEnv;
+  }
