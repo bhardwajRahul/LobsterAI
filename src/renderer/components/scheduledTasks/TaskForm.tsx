@@ -192,6 +192,7 @@ const TaskForm: React.FC<TaskFormProps> = ({ mode, task, onCancel, onSaved }) =>
     return () => {
       cancelled = true;
     };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [form.notifyChannel]);
 
   const updateForm = (patch: Partial<FormState>) => {
@@ -400,8 +401,8 @@ const TaskForm: React.FC<TaskFormProps> = ({ mode, task, onCancel, onSaved }) =>
 
     if (form.planType === 'weekly') {
       // Locale-aware weekday order:
-      // zh: Mon(1)→Sun(0) — Chinese convention starts with Monday
-      // en: Sun(0)→Sat(6) — English convention starts with Sunday
+      // zh: Mon(1)→Sun(0) �?Chinese convention starts with Monday
+      // en: Sun(0)→Sat(6) �?English convention starts with Sunday
       const WEEKDAY_SHORT_LABELS: [string, number][] =
         i18nService.getLanguage() === 'zh'
           ? [
@@ -525,7 +526,7 @@ const TaskForm: React.FC<TaskFormProps> = ({ mode, task, onCancel, onSaved }) =>
 
   const getChannelDisplayLabel = (channelValue: string): string => {
     if (channelValue === 'none') return i18nService.t('scheduledTasksFormNotifyChannelNone');
-    // Use i18n translation for platform name (e.g. weixin → '微信', feishu → '飞书')
+    // Use i18n translation for platform name (e.g. weixin �?'微信', feishu �?'飞书')
     const platform = PlatformRegistry.platformOfChannel(channelValue);
     if (platform) {
       const label = i18nService.t(platform) || PlatformRegistry.get(platform).label;
