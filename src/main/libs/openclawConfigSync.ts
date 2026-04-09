@@ -1368,36 +1368,6 @@ export class OpenClawConfigSync {
       managedConfig.channels = { ...(managedConfig.channels as Record<string, unknown> || {}), 'openclaw-weixin': weixinChannel };
     }
 
-    // Inject _agentBinding into channel configs that have a non-main binding,
-    // forcing those channels to restart when the binding changes.  OpenClaw
-    // channel plugins capture their config at startup and never refresh it,
-    // so bindings-only config changes (kind: "none" in the reload plan) are
-    // invisible to running plugins.  By touching the channel config we trigger
-    // a "channels.*" diff path which forces the plugin to restart.
-    const platformBindingsForSentinel = this.getIMSettings?.()?.platformAgentBindings;
-    if (platformBindingsForSentinel) {
-      const channels = (managedConfig.channels ?? {}) as Record<string, Record<string, unknown>>;
-      for (const channelKey of Object.keys(channels)) {
-        if (!channels[channelKey] || typeof channels[channelKey] !== 'object') continue;
-        const platformKey = PlatformRegistry.platformOfChannel(channelKey);
-        if (!platformKey) continue;
-        // Collect all bindings for this platform (platform-level + per-instance)
-        const bindingValues: string[] = [];
-        if (platformBindingsForSentinel[platformKey] && platformBindingsForSentinel[platformKey] !== 'main') {
-          bindingValues.push(platformBindingsForSentinel[platformKey]);
-        }
-        const prefix = `${platformKey}:`;
-        for (const key of Object.keys(platformBindingsForSentinel)) {
-          if (key.startsWith(prefix) && platformBindingsForSentinel[key] !== 'main') {
-            bindingValues.push(`${key}=${platformBindingsForSentinel[key]}`);
-          }
-        }
-        if (bindingValues.length > 0) {
-          channels[channelKey]._agentBinding = bindingValues.join(',');
-        }
-      }
-    }
-
     const nextContent = `${JSON.stringify(managedConfig, null, 2)}\n`;
     console.log('[OpenClawConfigSync] sync() managedConfig key fields:', {
       providers: (managedConfig.models as Record<string, unknown>)?.providers,
