@@ -86,7 +86,8 @@ const BUNDLED_EXTENSIONS_TO_KEEP = new Set([
 // Callers already have try-catch protection.
 
 const PACKAGES_TO_STUB = [
-  'koffi',            // Windows FFI for terminal PTY — not needed in gateway mode
+  'koffi',                  // Windows FFI for terminal PTY — not needed in gateway mode
+  '@tloncorp/tlon-skill',   // Tlon channel pruned from dist/extensions; native binary not needed
 ];
 
 const GENERIC_STUB_INDEX_CJS = `// Stub (CJS): this package is not needed for headless gateway operation.
@@ -253,6 +254,29 @@ function main() {
   // Step 2: Replace large unnecessary packages with stubs
   for (const pkgName of PACKAGES_TO_STUB) {
     stubPackage(path.join(nodeModulesDir, pkgName), pkgName, stats);
+  }
+
+  // Step 2a: Remove orphaned platform-specific binaries for stubbed packages.
+  // When a package like @tloncorp/tlon-skill is stubbed, its optionalDependencies
+  // (e.g. @tloncorp/tlon-skill-darwin-x64) remain as orphaned siblings.
+  for (const pkgName of PACKAGES_TO_STUB) {
+    if (!pkgName.startsWith('@')) continue;
+    const [scope, base] = pkgName.split('/');
+    const scopeDir = path.join(nodeModulesDir, scope);
+    if (!fs.existsSync(scopeDir)) continue;
+    for (const entry of fs.readdirSync(scopeDir, { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue;
+      if (entry.name === base) continue;
+      if (!entry.name.startsWith(base + '-')) continue;
+      const variantDir = path.join(scopeDir, entry.name);
+      const size = getDirSize(variantDir);
+      fs.rmSync(variantDir, { recursive: true, force: true });
+      stats.bytesFreed += size;
+      stats.dirsRemoved++;
+      console.log(
+        `[prune-openclaw-runtime] Removed orphaned platform binary ${scope}/${entry.name} (${(size / 1024 / 1024).toFixed(1)} MB)`
+      );
+    }
   }
 
   // Step 2b: Remove broken .bin symlinks left behind by stubbed packages
