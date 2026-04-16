@@ -106,6 +106,9 @@ const IPC_MAX_KEYS = 80;
 const IPC_MAX_ITEMS = 40;
 const MAX_INLINE_ATTACHMENT_BYTES = 25 * 1024 * 1024;
 const ENGINE_NOT_READY_CODE = 'ENGINE_NOT_READY';
+const PowerSaveBlockerType = {
+  PreventAppSuspension: 'prevent-app-suspension',
+} as const;
 const MIME_EXTENSION_MAP: Record<string, string> = {
   'image/png': '.png',
   'image/jpeg': '.jpg',
@@ -736,6 +739,20 @@ let openClawStatusForwarderBound = false;
 let coworkRuntimeForwarderBound = false;
 let memoryMigrationDone = false;
 let preventSleepBlockerId: number | null = null;
+
+function setPreventSleepBlockerEnabled(enabled: boolean): void {
+  if (enabled) {
+    if (preventSleepBlockerId === null || !powerSaveBlocker.isStarted(preventSleepBlockerId)) {
+      preventSleepBlockerId = powerSaveBlocker.start(PowerSaveBlockerType.PreventAppSuspension);
+    }
+    return;
+  }
+
+  if (preventSleepBlockerId !== null && powerSaveBlocker.isStarted(preventSleepBlockerId)) {
+    powerSaveBlocker.stop(preventSleepBlockerId);
+  }
+  preventSleepBlockerId = null;
+}
 
 const initStore = async (): Promise<SqliteStore> => {
   if (!storeInitPromise) {
@@ -2030,16 +2047,7 @@ if (!gotTheLock) {
       return { success: false, error: 'Invalid parameter: enabled must be boolean' };
     }
     try {
-      if (enabled) {
-        if (preventSleepBlockerId === null || !powerSaveBlocker.isStarted(preventSleepBlockerId)) {
-          preventSleepBlockerId = powerSaveBlocker.start('prevent-app-suspension');
-        }
-      } else {
-        if (preventSleepBlockerId !== null && powerSaveBlocker.isStarted(preventSleepBlockerId)) {
-          powerSaveBlocker.stop(preventSleepBlockerId);
-          preventSleepBlockerId = null;
-        }
-      }
+      setPreventSleepBlockerEnabled(enabled);
       getStore().set('prevent_sleep_enabled', enabled);
       return { success: true };
     } catch (error) {
@@ -5291,7 +5299,7 @@ if (!gotTheLock) {
     const preventSleepEnabled = getStore().get<boolean>('prevent_sleep_enabled');
     if (preventSleepEnabled) {
       try {
-        preventSleepBlockerId = powerSaveBlocker.start('prevent-display-sleep');
+        setPreventSleepBlockerEnabled(true);
       } catch (err) {
         console.error('[Main] Failed to start prevent-sleep blocker:', err);
       }
