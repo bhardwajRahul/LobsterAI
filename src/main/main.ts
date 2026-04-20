@@ -22,7 +22,7 @@ import {
   rejectPairingRequest,
 } from './im/imPairingStore';
 import { pollNimQrLogin, startNimQrLogin } from './im/nimQrLoginService';
-import type { DingTalkInstanceConfig, FeishuInstanceConfig, NimInstanceConfig, Platform, QQInstanceConfig, WecomInstanceConfig } from './im/types';
+import type { DingTalkInstanceConfig, EmailMultiInstanceConfig, FeishuInstanceConfig, NimInstanceConfig, Platform, QQInstanceConfig, WecomInstanceConfig } from './im/types';
 import { registerNimQrLoginHandlers } from './ipcHandlers/nimQrLogin';
 import {
   getCronJobService,
@@ -93,6 +93,7 @@ import { loadOpenClawSessionPolicyConfig, saveOpenClawSessionPolicyConfig } from
 import { SkillManager } from './skillManager';
 import { getSkillServiceManager } from './skillServices';
 import { SqliteStore } from './sqliteStore';
+import { StartupProfiler } from './startupProfiler';
 import { createTray, destroyTray, updateTrayMenu } from './trayManager';
 
 // 设置应用程序名称
@@ -1011,6 +1012,13 @@ const getOpenClawConfigSync = (): OpenClawConfigSync => {
           return getIMGatewayManager().getConfig().popo;
           } catch {
           return null;
+        }
+      },
+      getEmailOpenClawConfig: () => {
+        try {
+          return getIMGatewayManager().getIMStore().getEmailConfig();
+        } catch {
+          return { instances: [] };
         }
       },
       getNimInstances: () => {
@@ -3856,6 +3864,67 @@ if (!gotTheLock) {
     }
   });
 
+  // Email: Test connection
+  ipcMain.handle('email:testConnection', async (event, { instanceId }: { instanceId: string }) => {
+    try {
+      const imManager = getIMGatewayManager();
+      const imStore = imManager.getIMStore();
+      const emailConfig = imStore.getEmailConfig();
+      const instance = emailConfig.instances.find(i => i.instanceId === instanceId);
+
+      if (!instance) {
+        throw new Error('Instance not found');
+      }
+
+      if (instance.transport === 'imap') {
+        // Test IMAP connection using node-imap
+        let Imap: any;
+        try {
+          Imap = require('imap');
+        } catch {
+          throw new Error('IMAP module not installed. Please install the imap package.');
+        }
+        const deriveImapHost = (email: string) => {
+          const domain = email.split('@')[1];
+          return `imap.${domain}`;
+        };
+
+        const connection = new Imap({
+          user: instance.email,
+          password: instance.password,
+          host: instance.imapHost || deriveImapHost(instance.email),
+          port: instance.imapPort || 993,
+          tls: true,
+        });
+
+        await new Promise<void>((resolve, reject) => {
+          connection.once('ready', () => {
+            connection.end();
+            resolve();
+          });
+          connection.once('error', reject);
+          connection.connect();
+        });
+      } else if (instance.transport === 'ws') {
+        // Test WebSocket connection by fetching token
+        let fetchIMToken: (apiKey: string, email: string, logger: typeof console) => Promise<unknown>;
+        try {
+          ({ fetchIMToken } = require('@clawemail/node-sdk'));
+        } catch {
+          throw new Error('Email SDK not installed. Please install the @clawemail/node-sdk package.');
+        }
+        await fetchIMToken(instance.apiKey!, instance.email, console);
+      }
+
+      return { success: true };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : String(error),
+      };
+    }
+  });
+
   // ---- Pairing IPC handlers ----
 
   ipcMain.handle('im:pairing:list', async (_event, platform: string) => {
@@ -4109,6 +4178,28 @@ if (!gotTheLock) {
     }
   });
 
+  // Email Multi-Instance handlers
+  ipcMain.handle('im:email:instance:add', async (_event, name: string) => {
+    try {
+      const instanceId = crypto.randomUUID();
+      const { DEFAULT_EMAIL_INSTANCE_CONFIG: defaults } = await import('./im/types');
+      const instance = {
+        ...defaults,
+        instanceId,
+        instanceName: name || 'Email',
+        email: '',
+        agentId: 'main',
+      };
+      getIMGatewayManager().getIMStore().setEmailInstanceConfig(instanceId, instance);
+      return { success: true, instance };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Failed to add email instance',
+      };
+    }
+  });
+
   // WeCom Multi-Instance handlers
   ipcMain.handle('im:wecom:instance:add', async (_event, name: string) => {
     try {
@@ -4129,6 +4220,21 @@ if (!gotTheLock) {
     }
   });
 
+  ipcMain.handle('im:email:instance:delete', async (_event, instanceId: string) => {
+    try {
+      getIMGatewayManager().getIMStore().deleteEmailInstance(instanceId);
+      if (getOpenClawEngineManager().getStatus().phase === 'running') {
+        scheduleImConfigSync();
+      }
+      return { success: true };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Failed to delete email instance',
+      };
+    }
+  });
+
   ipcMain.handle('im:wecom:instance:delete', async (_event, instanceId: string) => {
     try {
       getIMGatewayManager().getIMStore().deleteWecomInstance(instanceId);
@@ -4140,6 +4246,21 @@ if (!gotTheLock) {
       return {
         success: false,
         error: error instanceof Error ? error.message : 'Failed to delete WeCom instance',
+      };
+    }
+  });
+
+  ipcMain.handle('im:email:instance:config:set', async (_event, instanceId: string, config: Partial<EmailMultiInstanceConfig['instances'][number]>, options?: { syncGateway?: boolean }) => {
+    try {
+      getIMGatewayManager().getIMStore().setEmailInstanceConfig(instanceId, config);
+      if (options?.syncGateway && getOpenClawEngineManager().getStatus().phase === 'running') {
+        scheduleImConfigSync();
+      }
+      return { success: true };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Failed to set email instance config',
       };
     }
   });
@@ -4323,6 +4444,20 @@ if (!gotTheLock) {
     }
     return { success: true, paths: result.filePaths };
   });
+
+  ipcMain.handle(
+    'dialog:showMessageBox',
+    async (event, options: { message: string; type?: 'none' | 'info' | 'error' | 'question' | 'warning'; title?: string }) => {
+      const ownerWindow = BrowserWindow.fromWebContents(event.sender);
+      const { dialog } = await import('electron');
+      return dialog.showMessageBox(ownerWindow!, {
+        type: options.type || 'warning',
+        title: options.title || '',
+        message: options.message,
+        buttons: ['OK'],
+      });
+    }
+  );
 
   ipcMain.handle(
     'dialog:saveInlineFile',
@@ -5045,8 +5180,12 @@ if (!gotTheLock) {
 
   // 初始化应用
   const initApp = async () => {
+    const profiler = new StartupProfiler();
+
+    profiler.mark('app.whenReady');
     console.log('[Main] initApp: waiting for app.whenReady()');
     await app.whenReady();
+    profiler.measure('app.whenReady');
     console.log('[Main] initApp: app is ready');
 
     // Note: Calendar permission is checked on-demand when calendar operations are requested
@@ -5067,8 +5206,10 @@ if (!gotTheLock) {
       return net.fetch(`file://${filePath}`);
     });
 
+    profiler.mark('initStore');
     console.log('[Main] initApp: starting initStore()');
     store = await initStore();
+    profiler.measure('initStore');
     console.log('[Main] initApp: store initialized');
     refreshEndpointsTestMode(store);
     sqliteBackupManager = new SqliteBackupManager(app.getPath('userData'));
@@ -5209,6 +5350,7 @@ if (!gotTheLock) {
 
     // Start the lightweight token proxy before OpenClaw config sync so that
     // lobsterai-server provider can use the proxy URL in its config.
+    profiler.mark('openClawTokenProxy');
     try {
       await startOpenClawTokenProxy({
         getAuthTokens,
@@ -5219,8 +5361,10 @@ if (!gotTheLock) {
     } catch (err) {
       console.warn('[Main] OpenClaw token proxy failed to start (non-fatal):', err);
     }
+    profiler.measure('openClawTokenProxy');
 
     // Enterprise config sync — must run before openclawConfigSync
+    profiler.mark('enterpriseConfigSync');
     // so enterprise data is in SQLite when the config is generated.
     const enterpriseConfigPath = resolveEnterpriseConfigPath();
     if (enterpriseConfigPath) {
@@ -5283,6 +5427,7 @@ if (!gotTheLock) {
         console.log('[Enterprise] config package removed, cleared enterprise mode and reset executionMode');
       }
     }
+    profiler.measure('enterpriseConfigSync');
 
     bindCoworkRuntimeForwarder();
     bindOpenClawStatusForwarder();
@@ -5296,6 +5441,21 @@ if (!gotTheLock) {
       );
     }
 
+    // Start proxy BEFORE config sync so proxy-dependent providers (e.g. copilot)
+    // get the correct baseURL on the first write, avoiding a mid-startup config
+    // overwrite that triggers unnecessary gateway hot-reload.
+    profiler.mark('applyProxyPreference');
+    const appConfig = getStore().get<AppConfigSettings>('app_config');
+    await applyProxyPreference(getUseSystemProxyFromConfig(appConfig));
+    profiler.measure('applyProxyPreference');
+
+    profiler.mark('coworkOpenAICompatProxy');
+    await startCoworkOpenAICompatProxy().catch((error) => {
+      console.error('Failed to start OpenAI compatibility proxy:', error);
+    });
+    profiler.measure('coworkOpenAICompatProxy');
+
+    profiler.mark('syncOpenClawConfig');
     const startupSync = await syncOpenClawConfig({
       reason: 'startup',
       restartGatewayIfRunning: false,
@@ -5303,6 +5463,7 @@ if (!gotTheLock) {
     if (!startupSync.success) {
       console.error('[OpenClaw] Startup config sync failed:', startupSync.error);
     }
+    profiler.measure('syncOpenClawConfig');
     if (resolveCoworkAgentEngine() === 'openclaw') {
       void ensureOpenClawRunningForCowork().then(() => {
         // Start cron polling once the gateway is confirmed running.
@@ -5316,7 +5477,21 @@ if (!gotTheLock) {
       });
     }
 
-    console.log('[Main] initApp: setStoreGetter done');
+    // ── Step 1: Show window ASAP ──────────────────────────────────────
+    // CSP + createWindow moved before skill initialisation so the user
+    // sees the loading UI within ~1-2 s instead of waiting for the full
+    // skill bootstrap (~6-8 s previously).
+    setContentSecurityPolicy();
+
+    profiler.mark('createWindow');
+    console.log('[Main] initApp: creating window');
+    createWindow();
+    profiler.measure('createWindow');
+    console.log('[Main] initApp: window created');
+
+    // ── Step 2-4: Skill bootstrap (non-blocking) ────────────────────
+    console.log('[Main] initApp: starting skill bootstrap');
+    profiler.mark('skillManager');
     const manager = getSkillManager();
     console.log('[Main] initApp: getSkillManager done');
 
@@ -5328,75 +5503,68 @@ if (!gotTheLock) {
       });
     });
 
-    // Non-critical: sync bundled skills to user data.
-    // Wrapped in try-catch so a failure here does not block window creation.
-    try {
-      manager.syncBundledSkillsToUserData();
-      console.log('[Main] initApp: syncBundledSkillsToUserData done');
-    } catch (error) {
-      console.error('[Main] initApp: syncBundledSkillsToUserData failed:', error);
-    }
+    // Parallelise independent skill sub-tasks (Step 4).
+    await Promise.all([
+      // Group A: file-system skill operations (sync, must run in order)
+      (async () => {
+        profiler.mark('syncBundledSkills');
+        try {
+          manager.syncBundledSkillsToUserData();
+          console.log('[Main] initApp: syncBundledSkillsToUserData done');
+        } catch (error) {
+          console.error('[Main] initApp: syncBundledSkillsToUserData failed:', error);
+        }
+        profiler.measure('syncBundledSkills');
 
-    try {
-      manager.recoverInterruptedUpgrades();
-      console.log('[Main] initApp: recoverInterruptedUpgrades done');
-    } catch (error) {
-      console.error('[Main] initApp: recoverInterruptedUpgrades failed:', error);
-    }
+        try {
+          manager.recoverInterruptedUpgrades();
+          console.log('[Main] initApp: recoverInterruptedUpgrades done');
+        } catch (error) {
+          console.error('[Main] initApp: recoverInterruptedUpgrades failed:', error);
+        }
 
-    try {
-      const runtimeResult = await ensurePythonRuntimeReady();
-      if (!runtimeResult.success) {
-        console.error('[Main] initApp: ensurePythonRuntimeReady failed:', runtimeResult.error);
-      } else {
-        console.log('[Main] initApp: ensurePythonRuntimeReady done');
-      }
-    } catch (error) {
-      console.error('[Main] initApp: ensurePythonRuntimeReady threw:', error);
-    }
+        try {
+          manager.startWatching();
+          console.log('[Main] initApp: startWatching done');
+        } catch (error) {
+          console.error('[Main] initApp: startWatching failed:', error);
+        }
+      })(),
 
-    try {
-      manager.startWatching();
-      console.log('[Main] initApp: startWatching done');
-    } catch (error) {
-      console.error('[Main] initApp: startWatching failed:', error);
-    }
+      // Group B: python runtime (independent, async)
+      (async () => {
+        profiler.mark('pythonRuntime');
+        try {
+          const runtimeResult = await ensurePythonRuntimeReady();
+          if (!runtimeResult.success) {
+            console.error('[Main] initApp: ensurePythonRuntimeReady failed:', runtimeResult.error);
+          } else {
+            console.log('[Main] initApp: ensurePythonRuntimeReady done');
+          }
+        } catch (error) {
+          console.error('[Main] initApp: ensurePythonRuntimeReady threw:', error);
+        }
+        profiler.measure('pythonRuntime');
+      })(),
+    ]);
 
-    // Start skill services (non-critical)
+    // Skill services (web-search bridge) — fire-and-forget (Step 2).
+    // No IPC handler or downstream init depends on this completing.
     try {
       const skillServices = getSkillServiceManager();
       console.log('[Main] initApp: getSkillServiceManager done');
-      await skillServices.startAll();
-      console.log('[Main] initApp: skill services started');
-    } catch (error) {
-      console.error('[Main] initApp: skill services failed:', error);
-    }
-
-    const appConfig = getStore().get<AppConfigSettings>('app_config');
-    await applyProxyPreference(getUseSystemProxyFromConfig(appConfig));
-
-    await startCoworkOpenAICompatProxy().catch((error) => {
-      console.error('Failed to start OpenAI compatibility proxy:', error);
-    });
-
-    // Re-sync OpenClaw config after proxy is ready so that providers that route
-    // through the proxy (e.g. github-copilot) get the correct baseUrl.
-    if (resolveCoworkAgentEngine() === 'openclaw') {
-      const proxyResync = await syncOpenClawConfig({
-        reason: 'proxy-ready',
+      const t0 = performance.now();
+      void skillServices.startAll().then(() => {
+        console.log(`[Main] initApp: skill services started (background, ${(performance.now() - t0).toFixed(0)}ms)`);
+      }).catch((error) => {
+        console.error('[Main] initApp: skill services failed:', error);
       });
-      if (proxyResync.changed) {
-        console.log('[Main] OpenClaw config updated after proxy ready, gateway will restart to pick up new config');
-      }
+    } catch (error) {
+      console.error('[Main] initApp: skill services init failed:', error);
     }
+    profiler.measure('skillManager');
 
-    // 设置安全策略
-    setContentSecurityPolicy();
-
-    // 创建窗口
-    console.log('[Main] initApp: creating window');
-    createWindow();
-    console.log('[Main] initApp: window created');
+    console.log(profiler.summary());
 
     // Windows/Linux cold start: parse deep link from process.argv
     // Always buffer since renderer is not ready yet after createWindow()
