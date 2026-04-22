@@ -358,7 +358,6 @@ const App: React.FC = () => {
       setAppUpdateState(state);
 
       if (state.status === AppUpdateStatus.Ready && previousStatus !== AppUpdateStatus.Ready) {
-        setShowUpdateModal(true);
         if (shouldInstallReadyUpdateRef.current && state.readyFilePath) {
           shouldInstallReadyUpdateRef.current = false;
           void window.electron.appUpdate.installReady().then((installResult) => {
