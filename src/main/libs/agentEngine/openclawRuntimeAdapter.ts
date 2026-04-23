@@ -3559,24 +3559,10 @@ export class OpenClawRuntimeAdapter extends EventEmitter implements CoworkRuntim
           return;
         }
 
-        if (isChannel) {
-          canonicalText = extractCurrentTurnAssistantText(history.messages);
-        } else {
-          for (let index = history.messages.length - 1; index >= 0; index -= 1) {
-            const message = history.messages[index];
-            if (!isRecord(message)) continue;
-            const role = typeof message.role === 'string' ? message.role.trim().toLowerCase() : '';
-            if (role !== 'assistant') continue;
-            canonicalText = extractMessageText(message).trim();
-            if (canonicalText && shouldSuppressHeartbeatText('assistant', canonicalText)) {
-              canonicalText = '';
-              continue;
-            }
-            if (canonicalText) {
-              break;
-            }
-          }
-        }
+        // Use turn-aware extraction for ALL session types.
+        // The previous non-channel backward scan could return stale assistant text
+        // from a prior turn when the gateway rejected the current run (empty final).
+        canonicalText = extractCurrentTurnAssistantText(history.messages);
 
         if (canonicalText) {
           break;
