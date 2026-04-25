@@ -704,6 +704,7 @@ export class OpenClawRuntimeAdapter extends EventEmitter implements CoworkRuntim
   private readonly confirmationModeBySession = new Map<string, 'modal' | 'text'>();
   private readonly bridgedSessions = new Set<string>();
   private readonly lastSystemPromptBySession = new Map<string, string>();
+  private readonly lastPatchedModelBySession = new Map<string, string>();
   private readonly gatewayHistoryCountBySession = new Map<string, number>();
   private readonly latestTurnTokenBySession = new Map<string, number>();
 
@@ -1347,6 +1348,19 @@ export class OpenClawRuntimeAdapter extends EventEmitter implements CoworkRuntim
 
     const runId = randomUUID();
     const turnToken = this.nextTurnToken(sessionId);
+
+    const agent = this.store.getAgent(agentId);
+    const currentModel = session.modelOverride || agent?.model || '';
+    if (currentModel && currentModel !== this.lastPatchedModelBySession.get(sessionId)) {
+      try {
+        const client = this.requireGatewayClient();
+        await client.request('sessions.patch', { key: sessionKey, model: currentModel });
+        this.lastPatchedModelBySession.set(sessionId, currentModel);
+      } catch (error) {
+        console.warn('[OpenClawRuntime] Failed to patch session model, will retry on next turn:', error);
+      }
+    }
+
     const outboundMessage = await this.buildOutboundPrompt(
       sessionId,
       prompt,
@@ -1458,11 +1472,18 @@ export class OpenClawRuntimeAdapter extends EventEmitter implements CoworkRuntim
       this.lastSystemPromptBySession.delete(sessionId);
     }
 
+    const session = this.store.getSession(sessionId);
+    const agent = agentId ? this.store.getAgent(agentId) : null;
+    const currentModel = session?.modelOverride || agent?.model || '';
+
     const sections: string[] = [];
     if (shouldInjectSystemPrompt) {
       sections.push(this.buildSystemPromptPrefix(normalizedSystemPrompt));
     }
     sections.push(buildOpenClawLocalTimeContextPrompt());
+    if (currentModel) {
+      sections.push(`[Session info]\nCurrent model: ${currentModel}`);
+    }
 
     if (this.bridgedSessions.has(sessionId)) {
       if (prompt.trim()) {
@@ -1487,7 +1508,6 @@ export class OpenClawRuntimeAdapter extends EventEmitter implements CoworkRuntim
     this.bridgedSessions.add(sessionId);
 
     if (!hasHistory) {
-      const session = this.store.getSession(sessionId);
       if (session) {
         const bridgePrefix = this.buildBridgePrefix(session.messages, prompt);
         if (bridgePrefix) {
@@ -2331,22 +2351,32 @@ export class OpenClawRuntimeAdapter extends EventEmitter implements CoworkRuntim
     }
 
     const session = this.store.getSession(sessionId);
-    const lastMessage = session?.messages[session.messages.length - 1];
-    if (!lastMessage || lastMessage.type !== 'assistant') {
-      return null;
+    const messages = session?.messages ?? [];
+    // Scan backward: in normal flow the assistant message is last; after a skill switch
+    // one user message may sit between the previous assistant reply and this sync (Bug 2).
+    // Allow at most one non-assistant message before giving up.
+    let nonAssistantCount = 0;
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const msg = messages[i];
+      if (msg.type === 'assistant') {
+        if (msg.content.trim() !== normalizedContent) {
+          return null;
+        }
+        this.store.updateMessage(sessionId, msg.id, {
+          content,
+          metadata: {
+            isStreaming: false,
+            isFinal: true,
+          },
+        });
+        return msg.id;
+      }
+      nonAssistantCount++;
+      if (nonAssistantCount > 1) {
+        return null;
+      }
     }
-    if (lastMessage.content.trim() !== normalizedContent) {
-      return null;
-    }
-
-    this.store.updateMessage(sessionId, lastMessage.id, {
-      content,
-      metadata: {
-        isStreaming: false,
-        isFinal: true,
-      },
-    });
-    return lastMessage.id;
+    return null;
   }
 
   private handleAgentLifecycleEvent(sessionId: string, data: unknown): void {
@@ -2362,11 +2392,22 @@ export class OpenClawRuntimeAdapter extends EventEmitter implements CoworkRuntim
       // `phase=end` event IS reliable.  Wait a short window for handleChatFinal() to
       // run; if the turn is still active after that, complete it ourselves.
       const FALLBACK_DELAY_MS = 3000;
+      // Capture the ending run's ID now, before the timer fires. If the user sends a
+      // new message within the 3-second window, activeTurns will hold the NEW turn by
+      // the time the timer fires. Without the guard below, the timer would blindly
+      // complete the new turn — making the session appear idle while the LLM is still
+      // generating (Bug 1).
+      const endingTurn = this.activeTurns.get(sessionId);
+      const endingRunId =
+        endingTurn?.runId ??
+        (isRecord(data) && typeof data.runId === 'string' ? data.runId : null);
       setTimeout(() => {
-        const turn = this.activeTurns.get(sessionId);
-        if (!turn) return; // Already completed by handleChatFinal
+        const currentTurn = this.activeTurns.get(sessionId);
+        if (!currentTurn) return; // Already completed by handleChatFinal
+        // If a new turn started for a different run, skip — the new run manages itself.
+        if (endingRunId && !currentTurn.knownRunIds.has(endingRunId)) return;
         console.log('[OpenClawRuntime] agent lifecycle end fallback: completing turn that missed chat final, sessionId:', sessionId);
-        void this.completeChannelTurnFallback(sessionId, turn);
+        void this.completeChannelTurnFallback(sessionId, currentTurn);
       }, FALLBACK_DELAY_MS);
     }
 
@@ -4097,6 +4138,7 @@ export class OpenClawRuntimeAdapter extends EventEmitter implements CoworkRuntim
     this.bridgedSessions.delete(sessionId);
     this.confirmationModeBySession.delete(sessionId);
     this.manuallyStoppedSessions.delete(sessionId);
+    this.lastPatchedModelBySession.delete(sessionId);
 
     // Propagate to channel session sync
     if (this.channelSessionSync) {

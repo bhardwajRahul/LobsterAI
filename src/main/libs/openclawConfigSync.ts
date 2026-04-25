@@ -36,6 +36,7 @@ import { parseChannelSessionKey } from './openclawChannelSessionSync';
 import type { OpenClawEngineManager } from './openclawEngineManager';
 import { findThirdPartyExtensionsDir, hasBundledOpenClawExtension } from './openclawLocalExtensions';
 import { getOpenClawTokenProxyPort } from './openclawTokenProxy';
+import { isSystemProxyEnabled } from './systemProxy';
 
 export type McpBridgeConfig = {
   callbackUrl: string;
@@ -422,6 +423,11 @@ type OpenClawProviderSelection = {
     api: OpenClawProviderApi;
     apiKey: string;
     auth: typeof AuthType[keyof typeof AuthType];
+    request?: {
+      proxy: {
+        mode: 'env-proxy';
+      };
+    };
     models: Array<{
       id: string;
       name: string;
@@ -472,6 +478,22 @@ const stripChatCompletionsSuffix = (rawBaseUrl: string): string => {
   }
   return normalized;
 };
+
+const isLoopbackProviderBaseUrl = (rawBaseUrl: string): boolean => {
+  try {
+    const host = new URL(rawBaseUrl).hostname.toLowerCase().replace(/^\[|\]$/g, '');
+    return host === 'localhost'
+      || host === '127.0.0.1'
+      || host === '::1'
+      || host === '0.0.0.0';
+  } catch {
+    return false;
+  }
+};
+
+const shouldUseEnvProxyForProviderBaseUrl = (rawBaseUrl: string): boolean => (
+  isSystemProxyEnabled() && !isLoopbackProviderBaseUrl(rawBaseUrl)
+);
 
 const normalizeGeminiBaseUrl = (rawBaseUrl: string): string => {
   return normalizeBaseUrlPath(
@@ -707,6 +729,9 @@ export const buildProviderSelection = (options: {
   const reasoning = descriptor.resolveModelReasoning
     ? descriptor.resolveModelReasoning(options.modelId, !!options.codingPlanEnabled)
     : descriptor.modelDefaults?.reasoning;
+  const request = shouldUseEnvProxyForProviderBaseUrl(baseUrl)
+    ? { proxy: { mode: 'env-proxy' as const } }
+    : undefined;
 
   return {
     providerId: descriptor.providerId,
@@ -718,6 +743,7 @@ export const buildProviderSelection = (options: {
       api,
       apiKey,
       auth,
+      ...(request ? { request } : {}),
       models: [
         {
           id: sessionModelId,
@@ -755,6 +781,37 @@ const readPreinstalledPluginIds = (): string[] => {
 const isBundledPluginAvailable = (pluginId: string): boolean => {
   return hasBundledOpenClawExtension(pluginId);
 };
+
+function normalizeMcpToolInputSchemaForOpenAI(schema: unknown): unknown {
+  if (Array.isArray(schema)) {
+    return schema.map(normalizeMcpToolInputSchemaForOpenAI);
+  }
+  if (!schema || typeof schema !== 'object') {
+    return schema;
+  }
+
+  const record = schema as Record<string, unknown>;
+  const normalized: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(record)) {
+    normalized[key] = normalizeMcpToolInputSchemaForOpenAI(value);
+  }
+
+  const schemaType = normalized.type;
+  const isArraySchema = schemaType === 'array'
+    || (Array.isArray(schemaType) && schemaType.includes('array'));
+  if (isArraySchema && normalized.items === undefined) {
+    normalized.items = {};
+  }
+
+  return normalized;
+}
+
+const normalizeMcpBridgeToolManifestEntry = (
+  tool: McpToolManifestEntry,
+): McpToolManifestEntry => ({
+  ...tool,
+  inputSchema: normalizeMcpToolInputSchemaForOpenAI(tool.inputSchema) as Record<string, unknown>,
+});
 
 export type OpenClawConfigSyncResult = {
   ok: boolean;
@@ -1086,6 +1143,30 @@ export class OpenClawConfigSync {
             mode: sandboxMode,
           },
           ...(workspaceDir ? { workspace: path.resolve(workspaceDir) } : {}),
+          ...(coworkConfig.embeddingEnabled ? {
+            memorySearch: {
+              enabled: true,
+              provider: (['openai', 'gemini', 'voyage', 'mistral', 'ollama'].includes(coworkConfig.embeddingProvider)
+                ? coworkConfig.embeddingProvider
+                : 'openai'),
+              ...(coworkConfig.embeddingModel ? { model: coworkConfig.embeddingModel } : {}),
+              remote: {
+                ...(coworkConfig.embeddingRemoteBaseUrl ? { baseUrl: coworkConfig.embeddingRemoteBaseUrl } : {}),
+                ...(coworkConfig.embeddingRemoteApiKey ? { apiKey: coworkConfig.embeddingRemoteApiKey } : {}),
+              },
+              store: {
+                // Use trigram tokenizer for FTS5 — unicode61 (the openclaw default)
+                // cannot tokenize CJK characters, so Chinese/Japanese/Korean memory
+                // content is invisible to keyword search.
+                fts: { tokenizer: 'trigram' },
+              },
+              query: {
+                hybrid: {
+                  vectorWeight: coworkConfig.embeddingVectorWeight ?? 0.7,
+                },
+              },
+            },
+          } : {}),
         },
         ...this.buildAgentsList(primaryModel, this.engineManager.getStateDir()),
       },
@@ -1221,7 +1302,7 @@ export class OpenClawConfigSync {
         config: {
           callbackUrl: mcpBridgeCfg.callbackUrl,
           secret: '${LOBSTER_MCP_BRIDGE_SECRET}',
-          tools: mcpBridgeCfg.tools,
+          tools: mcpBridgeCfg.tools.map(normalizeMcpBridgeToolManifestEntry),
         },
       };
     }
@@ -1404,7 +1485,6 @@ export class OpenClawConfigSync {
     // Sync DingTalk OpenClaw channel config (via dingtalk-connector plugin) — multi-instance via accounts
     const enabledDingTalkInstances = dingTalkInstances.filter(i => i.enabled && i.clientId);
     if (enabledDingTalkInstances.length > 0) {
-      const gatewayToken = this.engineManager.getGatewayToken();
       const buildDingTalkAccountConfig = (
         inst: (typeof enabledDingTalkInstances)[0],
         secretEnvVar: string,
@@ -1730,13 +1810,15 @@ export class OpenClawConfigSync {
       const nxtMcpBridge = nextObj?.plugins?.entries?.['mcp-bridge'];
       const curCallbackUrl = curMcpBridge?.config?.callbackUrl;
       const nxtCallbackUrl = nxtMcpBridge?.config?.callbackUrl;
-      const curToolNames = (curMcpBridge?.config?.tools as Array<{ name?: string }> | undefined)
-        ?.map((t) => t.name).sort().join(',') ?? '';
-      const nxtToolNames = (nxtMcpBridge?.config?.tools as Array<{ name?: string }> | undefined)
-        ?.map((t) => t.name).sort().join(',') ?? '';
-      mcpBridgeConfigChanged = curCallbackUrl !== nxtCallbackUrl || curToolNames !== nxtToolNames;
+      const curTools = curMcpBridge?.config?.tools;
+      const nxtTools = nxtMcpBridge?.config?.tools;
+      const curToolsJson = JSON.stringify(Array.isArray(curTools) ? curTools : []);
+      const nxtToolsJson = JSON.stringify(Array.isArray(nxtTools) ? nxtTools : []);
+      const curToolCount = Array.isArray(curTools) ? curTools.length : 0;
+      const nxtToolCount = Array.isArray(nxtTools) ? nxtTools.length : 0;
+      mcpBridgeConfigChanged = curCallbackUrl !== nxtCallbackUrl || curToolsJson !== nxtToolsJson;
       if (mcpBridgeConfigChanged) {
-        console.log(`[GW-RESTART-DIAG] mcp-bridge config CHANGED: callbackUrl ${curCallbackUrl ?? 'null'} → ${nxtCallbackUrl ?? 'null'}, tools ${curToolNames.split(',').length} → ${nxtToolNames.split(',').length}`);
+        console.log(`[GW-RESTART-DIAG] mcp-bridge config CHANGED: callbackUrl ${curCallbackUrl ?? 'null'} → ${nxtCallbackUrl ?? 'null'}, tools ${curToolCount} → ${nxtToolCount}`);
       }
     } catch { /* ignore parse errors */ }
 
